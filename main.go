@@ -868,10 +868,10 @@ func getContainerOpenPorts(vmid int) ([]int, error) {
 		return []int{22}, nil
 	}
 
-	output, err := runCommandWithTimeout(2*time.Second, getPctPath(), "exec", strconv.Itoa(vmid), "--", "ss", "-tln")
+	output, err := runCommandWithTimeout(2*time.Second, getPctPath(), "exec", strconv.Itoa(vmid), "--", "ss", "-tlnu")
 	if err != nil {
 		// Fallback to netstat if ss is missing
-		output, err = runCommandWithTimeout(2*time.Second, getPctPath(), "exec", strconv.Itoa(vmid), "--", "netstat", "-tln")
+		output, err = runCommandWithTimeout(2*time.Second, getPctPath(), "exec", strconv.Itoa(vmid), "--", "netstat", "-tlnu")
 		if err != nil {
 			return nil, err
 		}
@@ -886,17 +886,22 @@ func getContainerOpenPorts(vmid int) ([]int, error) {
 			continue
 		}
 		fields := strings.Fields(line)
-		if len(fields) < 5 {
-			continue
-		}
-		addrPort := fields[4]
-		idx := strings.LastIndex(addrPort, ":")
-		if idx != -1 && idx < len(addrPort)-1 {
-			portStr := addrPort[idx+1:]
-			if p, err := strconv.Atoi(portStr); err == nil {
-				if !seen[p] {
-					seen[p] = true
-					ports = append(ports, p)
+		// Scan all fields to find the local address and port
+		for _, field := range fields {
+			idx := strings.LastIndex(field, ":")
+			if idx != -1 && idx < len(field)-1 {
+				portStr := field[idx+1:]
+				// Ensure it's not the peer port wildcard "*"
+				if portStr == "*" {
+					continue
+				}
+				if p, err := strconv.Atoi(portStr); err == nil {
+					if !seen[p] {
+						seen[p] = true
+						ports = append(ports, p)
+					}
+					// Once we find the valid local port on this line, move to next line
+					break
 				}
 			}
 		}
