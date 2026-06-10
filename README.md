@@ -89,7 +89,13 @@ if [[ $EUID -ne 0 ]]; then
    exit 1
 fi
 
-# 2. Download Precompiled Binary
+# 2. Stop Service if Running (Prevent 'Text File Busy' Errors)
+if systemctl is-active --quiet "${BINARY_NAME}.service"; then
+    echo "Stopping existing ${BINARY_NAME} service for upgrade..."
+    systemctl stop "${BINARY_NAME}.service"
+fi
+
+# 3. Download Precompiled Binary
 if [[ "${VERSION}" == "latest" ]]; then
     DOWNLOAD_URL="https://github.com/${GITHUB_REPO}/releases/latest/download/${BINARY_NAME}"
 else
@@ -104,12 +110,12 @@ else
     exit 1
 fi
 
-# 3. Configure Binary Permissions
+# 4. Configure Binary Permissions
 chmod 0755 "${INSTALL_PATH}"
 chown root:root "${INSTALL_PATH}"
 echo "Installed binary to ${INSTALL_PATH}."
 
-# 4. Generate Systemd Service Configuration
+# 5. Generate Systemd Service Configuration
 echo "Generating systemd service configuration..."
 cat <<EOF > "${SYSTEMD_SERVICE}"
 [Unit]
@@ -129,7 +135,7 @@ LimitNOFILE=65535
 WantedBy=multi-user.target
 EOF
 
-# 5. Reload Daemon and Start Service
+# 6. Reload Daemon and Start Service
 echo "Activating systemd service..."
 systemctl daemon-reload
 systemctl enable "${BINARY_NAME}.service"
