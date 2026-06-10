@@ -75,7 +75,7 @@ Save the following Bash script as `install.sh`, make it executable, and run it a
 set -euo pipefail
 
 # Configuration
-VERSION="v1.0.0" # Change to target tag version
+VERSION="latest" # Change to target tag version or keep "latest"
 GITHUB_REPO="arleypadua/proxmox-api"
 BINARY_NAME="proxmox-api"
 INSTALL_PATH="/usr/local/bin/${BINARY_NAME}"
@@ -90,8 +90,13 @@ if [[ $EUID -ne 0 ]]; then
 fi
 
 # 2. Download Precompiled Binary
-DOWNLOAD_URL="https://github.com/${GITHUB_REPO}/releases/download/${VERSION}/${BINARY_NAME}"
-echo "Downloading ${BINARY_NAME} ${VERSION}..."
+if [[ "${VERSION}" == "latest" ]]; then
+    DOWNLOAD_URL="https://github.com/${GITHUB_REPO}/releases/latest/download/${BINARY_NAME}"
+else
+    DOWNLOAD_URL="https://github.com/${GITHUB_REPO}/releases/download/${VERSION}/${BINARY_NAME}"
+fi
+
+echo "Downloading ${BINARY_NAME} (${VERSION})..."
 if curl -sSfL -o "${INSTALL_PATH}" "${DOWNLOAD_URL}"; then
     echo "Download completed successfully."
 else
