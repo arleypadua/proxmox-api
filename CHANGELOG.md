@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.2](https://github.com/arleypadua/proxmox-api/compare/v1.0.1...v1.0.2) (2026-06-10)
+
+
+### Bug Fixes
+
+* container diagnostics ([c8fa9cd](https://github.com/arleypadua/proxmox-api/commit/c8fa9cd40234df0b214d4d60390e6e40642777bb))
+
 ## [1.0.1](https://github.com/arleypadua/proxmox-api/compare/v1.0.0...v1.0.1) (2026-06-10)
 
 
