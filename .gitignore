@@ -1,0 +1,18 @@
+# Local environment variables containing credentials
+.env
+
+# Go binaries and distributions
+/proxmox-api
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Compiled directories
+bin/
+dist/
+
+# Test and coverage artifacts
+*.test
+*.out
