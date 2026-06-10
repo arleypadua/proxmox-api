@@ -224,3 +224,22 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o proxmox-api m
 - `GOOS=linux GOARCH=amd64`: Targets standard Linux AMD64 architecture used by Proxmox VE.
 - `-ldflags="-s -w"`: Strips debug information and symbol tables, reducing the binary footprint to its absolute minimum.
 
+---
+
+## Automated Releases & Semantic Versioning
+
+This repository integrates **Google's Release Please** workflow to automate semantic versioning (SemVer), changelog compilation, and release asset packaging based on **Conventional Commits**.
+
+### Conventional Commit Specification
+To trigger automatic version increments and changelog entries, use the following prefix formats in your commit messages:
+* **`fix: <description>`**: Patches a bug (triggers a **Patch** release bump: e.g., `v1.0.0` ➔ `v1.0.1`).
+* **`feat: <description>`**: Introduces a new feature (triggers a **Minor** release bump: e.g., `v1.0.0` ➔ `v1.1.0`).
+* **`feat!: <description>`** or **`refactor!: <description>`**: Introduces breaking changes (triggers a **Major** release bump: e.g., `v1.0.0` ➔ `v2.0.0`).
+* **`chore: <description>`** or **`docs: <description>`**: Housekeeping or documentation updates (does not trigger a release).
+
+### The Automated Release Cycle
+1. **Push Commits:** Push your Conventional Commits to the `main` branch.
+2. **Release PR Generation:** The workflow scans the commit logs, calculates the next version, updates `CHANGELOG.md`, and opens a Release Pull Request (e.g., `chore(main): release v1.0.0`).
+3. **Merging Release:** Merging the Release PR automatically tags the repository (e.g., `v1.0.0`) and compiles and attaches the statically linked production binary (`proxmox-api`) as a release asset.
+
+
