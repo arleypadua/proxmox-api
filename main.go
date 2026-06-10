@@ -825,6 +825,31 @@ func getContainerNetworkConfig(vmid int) ([]NetworkInterface, error) {
 	return interfaces, nil
 }
 
+func parseIPsFromIpAddr(output string) []string {
+	var ips []string
+	lines := strings.Split(output, "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		fields := strings.Fields(line)
+		for i, field := range fields {
+			if (field == "inet" || field == "inet6") && i+1 < len(fields) {
+				ipWithSubnet := fields[i+1]
+				ipParts := strings.Split(ipWithSubnet, "/")
+				if len(ipParts) > 0 {
+					ip := strings.TrimSpace(ipParts[0])
+					if ip != "127.0.0.1" && ip != "::1" && ip != "" {
+						ips = append(ips, ip)
+					}
+				}
+			}
+		}
+	}
+	return ips
+}
+
 // getContainerLiveIPs fetches actual live IP addresses via hostname -I inside the container
 func getContainerLiveIPs(vmid int) ([]string, error) {
 	if isMockMode() {
@@ -840,6 +865,19 @@ func getContainerLiveIPs(vmid int) ([]string, error) {
 		return []string{"192.168.2.200"}, nil
 	}
 
+	// Try using host-side PID-based nsenter first (extremely fast)
+	pid, err := getContainerPID(vmid)
+	if err == nil && pid > 0 {
+		output, nsErr := runCommandWithTimeout(2*time.Second, getNsenterPath(), "-t", strconv.Itoa(pid), "-n", "ip", "-o", "addr", "show")
+		if nsErr == nil {
+			ips := parseIPsFromIpAddr(output)
+			if len(ips) > 0 {
+				return ips, nil
+			}
+		}
+	}
+
+	// Fallback to container-side pct exec
 	output, err := runCommandWithTimeout(2*time.Second, getPctPath(), "exec", strconv.Itoa(vmid), "--", "hostname", "-I")
 	if err != nil {
 		return nil, err
@@ -853,7 +891,166 @@ func getContainerLiveIPs(vmid int) ([]string, error) {
 	return ips, nil
 }
 
-// getContainerOpenPorts fetches listening TCP ports inside container (ss -> netstat)
+func getLxcInfoPath() string {
+	if _, err := os.Stat("/usr/bin/lxc-info"); err == nil {
+		return "/usr/bin/lxc-info"
+	}
+	return "lxc-info"
+}
+
+func getNsenterPath() string {
+	if _, err := os.Stat("/usr/bin/nsenter"); err == nil {
+		return "/usr/bin/nsenter"
+	}
+	return "nsenter"
+}
+
+func getContainerPID(vmid int) (int, error) {
+	output, err := runCommandWithTimeout(2*time.Second, getLxcInfoPath(), "-n", strconv.Itoa(vmid), "-p")
+	if err != nil {
+		return 0, err
+	}
+	fields := strings.Fields(output)
+	if len(fields) < 2 {
+		return 0, fmt.Errorf("invalid lxc-info output: %q", output)
+	}
+	pidStr := fields[len(fields)-1]
+	pid, err := strconv.Atoi(pidStr)
+	if err != nil {
+		return 0, err
+	}
+	return pid, nil
+}
+
+func parseProcNetFile(filePath string, isTCP bool) ([]int, error) {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	var ports []int
+	seen := make(map[int]bool)
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.Contains(line, "local_address") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 4 {
+			continue
+		}
+		localAddr := fields[1]
+		remAddr := fields[2]
+		state := fields[3]
+
+		// Parse local port
+		localParts := strings.Split(localAddr, ":")
+		if len(localParts) < 2 {
+			continue
+		}
+		portHex := localParts[len(localParts)-1]
+		portVal, err := strconv.ParseInt(portHex, 16, 32)
+		if err != nil {
+			continue
+		}
+		port := int(portVal)
+
+		if isTCP {
+			// TCP: only include if state is TCP_LISTEN (0A)
+			if state == "0A" || state == "0a" {
+				if !seen[port] {
+					seen[port] = true
+					ports = append(ports, port)
+				}
+			}
+		} else {
+			// UDP: include if remote port is 0000
+			remParts := strings.Split(remAddr, ":")
+			if len(remParts) >= 2 {
+				remPortHex := remParts[len(remParts)-1]
+				if remPortHex == "0000" {
+					if !seen[port] {
+						seen[port] = true
+						ports = append(ports, port)
+					}
+				}
+			}
+		}
+	}
+	return ports, nil
+}
+
+func getContainerOpenPortsFromProc(pid int) ([]int, error) {
+	var ports []int
+	seen := make(map[int]bool)
+
+	addPorts := func(pList []int) {
+		for _, p := range pList {
+			if !seen[p] {
+				seen[p] = true
+				ports = append(ports, p)
+			}
+		}
+	}
+
+	files := []struct {
+		path  string
+		isTCP bool
+	}{
+		{fmt.Sprintf("/proc/%d/net/tcp", pid), true},
+		{fmt.Sprintf("/proc/%d/net/tcp6", pid), true},
+		{fmt.Sprintf("/proc/%d/net/udp", pid), false},
+		{fmt.Sprintf("/proc/%d/net/udp6", pid), false},
+	}
+
+	hasAny := false
+	for _, f := range files {
+		if pList, err := parseProcNetFile(f.path, f.isTCP); err == nil {
+			hasAny = true
+			addPorts(pList)
+		}
+	}
+
+	if !hasAny {
+		return nil, fmt.Errorf("failed to read any proc net files for pid %d", pid)
+	}
+
+	return ports, nil
+}
+
+func parsePortsFromSS(output string) []int {
+	var ports []int
+	seen := make(map[int]bool)
+	lines := strings.Split(output, "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "State") || strings.HasPrefix(line, "Netid") {
+			continue
+		}
+		fields := strings.Fields(line)
+		for _, field := range fields {
+			idx := strings.LastIndex(field, ":")
+			if idx != -1 && idx < len(field)-1 {
+				portStr := field[idx+1:]
+				if portStr == "*" {
+					continue
+				}
+				if p, err := strconv.Atoi(portStr); err == nil {
+					if !seen[p] {
+						seen[p] = true
+						ports = append(ports, p)
+					}
+					break
+				}
+			}
+		}
+	}
+	return ports
+}
+
+// getContainerOpenPorts fetches listening TCP/UDP ports inside container
 func getContainerOpenPorts(vmid int) ([]int, error) {
 	if isMockMode() {
 		if vmid == 100 {
@@ -868,45 +1065,34 @@ func getContainerOpenPorts(vmid int) ([]int, error) {
 		return []int{22}, nil
 	}
 
-	output, err := runCommandWithTimeout(2*time.Second, getPctPath(), "exec", strconv.Itoa(vmid), "--", "ss", "-tlnu")
-	if err != nil {
-		// Fallback to netstat if ss is missing
-		output, err = runCommandWithTimeout(2*time.Second, getPctPath(), "exec", strconv.Itoa(vmid), "--", "netstat", "-tlnu")
-		if err != nil {
-			return nil, err
+	// Try using host-side PID-based methods first
+	pid, err := getContainerPID(vmid)
+	if err == nil && pid > 0 {
+		// 1. Try reading /proc/<pid>/net/tcp etc. directly
+		if ports, procErr := getContainerOpenPortsFromProc(pid); procErr == nil {
+			return ports, nil
+		}
+
+		// 2. Try entering namespace with host nsenter + host ss
+		output, nsErr := runCommandWithTimeout(2*time.Second, getNsenterPath(), "-t", strconv.Itoa(pid), "-n", "ss", "-tlnu")
+		if nsErr == nil {
+			return parsePortsFromSS(output), nil
 		}
 	}
 
-	var ports []int
-	seen := make(map[int]bool)
-	lines := strings.Split(output, "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "State") || strings.HasPrefix(line, "Netid") {
-			continue
-		}
-		fields := strings.Fields(line)
-		// Scan all fields to find the local address and port
-		for _, field := range fields {
-			idx := strings.LastIndex(field, ":")
-			if idx != -1 && idx < len(field)-1 {
-				portStr := field[idx+1:]
-				// Ensure it's not the peer port wildcard "*"
-				if portStr == "*" {
-					continue
-				}
-				if p, err := strconv.Atoi(portStr); err == nil {
-					if !seen[p] {
-						seen[p] = true
-						ports = append(ports, p)
-					}
-					// Once we find the valid local port on this line, move to next line
-					break
-				}
-			}
-		}
+	// 3. Fallback: Run ss inside container via pct exec
+	output, err := runCommandWithTimeout(2*time.Second, getPctPath(), "exec", strconv.Itoa(vmid), "--", "ss", "-tlnu")
+	if err == nil {
+		return parsePortsFromSS(output), nil
 	}
-	return ports, nil
+
+	// 4. Fallback: Run netstat inside container via pct exec
+	output, err = runCommandWithTimeout(2*time.Second, getPctPath(), "exec", strconv.Itoa(vmid), "--", "netstat", "-tlnu")
+	if err == nil {
+		return parsePortsFromSS(output), nil
+	}
+
+	return []int{}, err
 }
 
 // deepProbeContainer performs specific DNS, Reverse Proxy, VPN, and Docker probes inside the running container

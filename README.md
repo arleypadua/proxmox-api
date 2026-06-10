@@ -95,9 +95,19 @@ if systemctl is-active --quiet "${BINARY_NAME}.service"; then
     systemctl stop "${BINARY_NAME}.service"
 fi
 
-# 3. Download Precompiled Binary
+# 3. Resolve Version and Download Precompiled Binary
 if [[ "${VERSION}" == "latest" ]]; then
-    DOWNLOAD_URL="https://github.com/${GITHUB_REPO}/releases/latest/download/${BINARY_NAME}"
+    # Try fetching the absolute latest tag (including pre-releases) from the GitHub API
+    API_URL="https://api.github.com/repos/${GITHUB_REPO}/releases"
+    LATEST_TAG=$(curl -sSf "${API_URL}" 2>/dev/null | grep -m1 '"tag_name":' | cut -d'"' -f4 || echo "")
+    
+    if [[ -n "${LATEST_TAG}" ]]; then
+        VERSION="${LATEST_TAG}"
+        DOWNLOAD_URL="https://github.com/${GITHUB_REPO}/releases/download/${VERSION}/${BINARY_NAME}"
+    else
+        # Fallback to standard redirect if API call fails
+        DOWNLOAD_URL="https://github.com/${GITHUB_REPO}/releases/latest/download/${BINARY_NAME}"
+    fi
 else
     DOWNLOAD_URL="https://github.com/${GITHUB_REPO}/releases/download/${VERSION}/${BINARY_NAME}"
 fi
