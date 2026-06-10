@@ -242,4 +242,17 @@ To trigger automatic version increments and changelog entries, use the following
 2. **Release PR Generation:** The workflow scans the commit logs, calculates the next version, updates `CHANGELOG.md`, and opens a Release Pull Request (e.g., `chore(main): release v1.0.0`).
 3. **Merging Release:** Merging the Release PR automatically tags the repository (e.g., `v1.0.0`) and compiles and attaches the statically linked production binary (`proxmox-api`) as a release asset.
 
+### Troubleshooting: Workflow Permission Error
+If your GitHub Actions run fails with the error:
+`Error: release-please failed: GitHub Actions is not permitted to create or approve pull requests.`
+
+You must grant GitHub Actions permission to write pull requests in your repository settings:
+1. Navigate to your repository page on GitHub.
+2. Click the **Settings** tab at the top.
+3. In the left-hand sidebar, under **Code and automation**, click **Actions** ➔ **General**.
+4. Scroll to the bottom to the **Workflow permissions** section.
+5. Check the box for **"Allow GitHub Actions to create and approve pull requests"**.
+6. Click **Save**.
+
+
 
