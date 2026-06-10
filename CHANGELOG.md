@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.1](https://github.com/arleypadua/proxmox-api/compare/v1.1.0...v1.1.1) (2026-06-10)
+
+
+### Bug Fixes
+
+* network ports ([1c95b3f](https://github.com/arleypadua/proxmox-api/commit/1c95b3f4eae9b1892af0774101e66aa7780b8db0))
+
 ## [1.1.0](https://github.com/arleypadua/proxmox-api/compare/v1.0.2...v1.1.0) (2026-06-10)
 
 
