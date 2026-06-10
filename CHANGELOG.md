@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.1](https://github.com/arleypadua/proxmox-api/compare/v1.0.0...v1.0.1) (2026-06-10)
+
+
+### Bug Fixes
+
+* not resolving api ([105936b](https://github.com/arleypadua/proxmox-api/commit/105936b104260ffb43abbe0da7f275ad4502e875))
+
 ## 1.0.0 (2026-06-10)
 
 
