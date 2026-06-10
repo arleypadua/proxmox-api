@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -9,7 +10,6 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -62,7 +62,7 @@ type ContainerDetail struct {
 	UptimeSeconds     int64   `json:"uptime_seconds"`
 }
 
-// OpenAPI 3.0 specification structural JSON
+// OpenAPI 3.0 specification structural JSON (Excluding notes endpoint)
 const openapiJSON = `{
   "openapi": "3.0.3",
   "info": {
@@ -165,53 +165,6 @@ const openapiJSON = `{
           },
           "404": {
             "description": "Container configuration not found"
-          }
-        }
-      }
-    },
-    "/api/v1/container/notes": {
-      "get": {
-        "summary": "Get container description/notes",
-        "description": "Returns the decoded notes/description text of the specified container.",
-        "security": [
-          {
-            "ApiKeyAuth": []
-          }
-        ],
-        "parameters": [
-          {
-            "name": "vmid",
-            "in": "query",
-            "description": "The unique numerical identifier for the container",
-            "required": true,
-            "schema": {
-              "type": "integer"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Decoded notes string",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "vmid": { "type": "integer" },
-                    "notes": { "type": "string" }
-                  }
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Invalid VMID parameter"
-          },
-          "401": {
-            "description": "Unauthorized"
-          },
-          "404": {
-            "description": "Container or notes not found"
           }
         }
       }
@@ -332,6 +285,19 @@ func isMockMode() bool {
 	}
 	_, err := exec.LookPath("pct")
 	return err != nil
+}
+
+// runCommandWithTimeout wraps exec.Command with context deadline to prevent hanging execution threads
+func runCommandWithTimeout(timeout time.Duration, name string, arg ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, name, arg...)
+	output, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	return string(output), nil
 }
 
 // loadEnv parses custom .env key pairs from the specified filepath
@@ -547,14 +513,13 @@ func getContainerList() ([]ContainerBasic, error) {
 		}, nil
 	}
 
-	cmd := exec.Command("pct", "list")
-	output, err := cmd.Output()
+	output, err := runCommandWithTimeout(3*time.Second, "pct", "list")
 	if err != nil {
 		return nil, fmt.Errorf("failed to execute pct list: %w", err)
 	}
 
 	var list []ContainerBasic
-	lines := strings.Split(string(output), "\n")
+	lines := strings.Split(output, "\n")
 	if len(lines) <= 1 {
 		return list, nil
 	}
@@ -668,10 +633,9 @@ func getContainerDetails() ([]ContainerDetail, error) {
 		}
 
 		if basic.Status == "running" {
-			cmd := exec.Command("pct", "status", strconv.Itoa(basic.VMID), "--verbose")
-			output, err := cmd.Output()
+			output, err := runCommandWithTimeout(2*time.Second, "pct", "status", strconv.Itoa(basic.VMID), "--verbose")
 			if err == nil {
-				scanner := bufio.NewScanner(strings.NewReader(string(output)))
+				scanner := bufio.NewScanner(strings.NewReader(output))
 				for scanner.Scan() {
 					line := scanner.Text()
 					parts := strings.SplitN(line, ":", 2)
@@ -701,6 +665,8 @@ func getContainerDetails() ([]ContainerDetail, error) {
 				if detail.MaxMemMiB > 0 {
 					detail.MemUtilizationPct = (detail.MemMiB / detail.MaxMemMiB) * 100.0
 				}
+			} else {
+				log.Printf("Warning: Failed to fetch pct status for container %d (timeout or error): %v", basic.VMID, err)
 			}
 		}
 
@@ -750,31 +716,22 @@ description: Mock%%20Container%%20Notes%%20for%%20testing.%%0ASecurity%%20Audit%
 	return string(content), nil
 }
 
-// getContainerNotes reads and URL-unescapes container description/notes field
-func getContainerNotes(vmid int) (string, error) {
-	if isMockMode() {
-		return "Mock Container Notes for testing.\nSecurity Audit: nesting=1, keyctl=1, unprivileged=0.", nil
-	}
-
-	confPath := fmt.Sprintf("/etc/pve/lxc/%d.conf", vmid)
-	conf, err := parseContainerConfig(confPath)
-	if err != nil {
-		return "", fmt.Errorf("failed to read container config: %w", err)
-	}
-
-	desc, ok := conf["description"]
-	if !ok {
-		return "", nil // Return empty string if no notes description is found
-	}
-
-	decoded, err := url.QueryUnescape(desc)
-	if err != nil {
-		return desc, nil // Fallback to raw string if unescape fails
-	}
-	return decoded, nil
-}
-
 // Middleware
+
+// corsMiddleware adds global CORS permissions for preflight and standard calls
+func corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-API-Key")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		next(w, r)
+	}
+}
 
 // apiKeyMiddleware enforces Token Authorization via X-API-Key header or api_key query string
 func apiKeyMiddleware(configuredKey string, next http.HandlerFunc) http.HandlerFunc {
@@ -921,47 +878,6 @@ func handleContainerConfig(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(configText))
 }
 
-// handleContainerNotes serves unescaped description/notes text for container
-func handleContainerNotes(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusMethodNotAllowed)
-		w.Write([]byte(`{"error": "Method not allowed"}`))
-		return
-	}
-
-	vmidStr := r.URL.Query().Get("vmid")
-	if vmidStr == "" {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"error": "vmid query parameter is required"})
-		return
-	}
-
-	vmid, err := strconv.Atoi(vmidStr)
-	if err != nil || vmid <= 0 {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"error": "vmid must be a valid positive integer"})
-		return
-	}
-
-	notes, err := getContainerNotes(vmid)
-	if err != nil {
-		log.Printf("Error fetching notes for container %d: %v", vmid, err)
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusNotFound)
-		json.NewEncoder(w).Encode(map[string]string{"error": fmt.Sprintf("Notes not found for VMID %d", vmid)})
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"vmid":  vmid,
-		"notes": notes,
-	})
-}
-
 // handleDocs returns the Swagger UI html bootstrap page
 func handleDocs(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -1069,13 +985,12 @@ func main() {
 	// Display credential configuration banner
 	printConfigBanner(envPath, apiKey, bindIP, bindPort)
 
-	// 3. Register HTTP handlers
-	http.HandleFunc("/api/v1/telemetry", apiKeyMiddleware(apiKey, handleTelemetry))
-	http.HandleFunc("/api/v1/containers", apiKeyMiddleware(apiKey, handleContainers))
-	http.HandleFunc("/api/v1/container/config", apiKeyMiddleware(apiKey, handleContainerConfig))
-	http.HandleFunc("/api/v1/container/notes", apiKeyMiddleware(apiKey, handleContainerNotes))
-	http.HandleFunc("/docs", handleDocs)
-	http.HandleFunc("/swagger.json", handleSwaggerJSON)
+	// 3. Register HTTP handlers (guarded with CORS and API authentication)
+	http.HandleFunc("/api/v1/telemetry", corsMiddleware(apiKeyMiddleware(apiKey, handleTelemetry)))
+	http.HandleFunc("/api/v1/containers", corsMiddleware(apiKeyMiddleware(apiKey, handleContainers)))
+	http.HandleFunc("/api/v1/container/config", corsMiddleware(apiKeyMiddleware(apiKey, handleContainerConfig)))
+	http.HandleFunc("/docs", corsMiddleware(handleDocs))
+	http.HandleFunc("/swagger.json", corsMiddleware(handleSwaggerJSON))
 
 	bindAddr := net.JoinHostPort(bindIP, bindPort)
 	fmt.Printf("[%s] Starting Proxmox API Broker... listening on http://%s\n", time.Now().Format(time.RFC3339), bindAddr)

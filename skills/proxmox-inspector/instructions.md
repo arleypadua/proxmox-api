@@ -15,7 +15,7 @@ To ensure robust interoperability and avoid hardcoded API schemas, you must perf
 3. **Establish Capability Mapping:** Map endpoints dynamically:
    - Identify the telemetry route (expected to be `/api/v1/telemetry`).
    - Identify the container detail route (expected to be `/api/v1/containers`).
-   - Identify configuration and note extraction endpoints (expected to be `/api/v1/container/config?vmid={vmid}` and `/api/v1/container/notes?vmid={vmid}`).
+   - Identify the configuration extraction endpoint (expected to be `/api/v1/container/config?vmid={vmid}`).
 
 ---
 
@@ -62,11 +62,12 @@ When inspecting individual container configurations (retrieved via `GET /api/v1/
 
 ---
 
-## 4. Policy Correlation (Container Notes)
+## 4. Policy Correlation (Container Notes / Description)
 
-Container description fields are used as compliance policy records. You must retrieve them using `GET /api/v1/container/notes?vmid=ID` and match settings:
+Container description/notes fields are used as compliance policy records. Proxmox VE stores container notes inside the raw configuration file as a URL-encoded string under the `description:` key. You must parse this metadata directly from the configuration text:
 
-1. **Extract Metadata:** Parse the decoded notes string to extract policy records such as Owner, Criticality Level, Approved Features, and Compliance Exemptions.
-2. **Compare Intended vs. Actual State:**
-   - If a container's config has `nesting=1` or `unprivileged: 0`, cross-check the description notes to verify if an explicit exemption exists (e.g. `Exemption: NestingApproved` or `SecurityClassification: PrivilegedAllowed`).
+1. **Retrieve and Extract:** Query the raw configuration using `GET /api/v1/container/config?vmid=ID`. Parse the configuration text to locate the line starting with `description:`. Extract the remainder of the line and **URL-decode** it (handling percent-encoding like `%20`, `%0A`, etc.) to obtain the plain text notes.
+2. **Extract Metadata:** Parse the decoded notes string to extract policy records such as Owner, Criticality Level, Approved Features, and Compliance Exemptions.
+3. **Compare Intended vs. Actual State:**
+   - If a container's config has `nesting=1` or `unprivileged: 0`, cross-check the decoded description notes to verify if an explicit exemption exists (e.g. `Exemption: NestingApproved` or `SecurityClassification: PrivilegedAllowed`).
    - If no matching exemption is documented in the notes, flag a **Compliance Drift Policy Violation** to alert network administrators of unauthorized configuration modifications.

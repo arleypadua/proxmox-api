@@ -194,9 +194,6 @@ curl -H "X-API-Key: ${API_KEY}" http://localhost:8000/api/v1/containers
 
 # Query Container Configuration File
 curl -H "X-API-Key: ${API_KEY}" "http://localhost:8000/api/v1/container/config?vmid=100"
-
-# Query Container Description Notes
-curl -H "X-API-Key: ${API_KEY}" "http://localhost:8000/api/v1/container/notes?vmid=100"
 ```
 
 ---
