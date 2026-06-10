@@ -278,10 +278,21 @@ const swaggerUIHTML = `<!DOCTYPE html>
 
 // Helper Functions
 
+// getPctPath resolves the absolute path of pct to avoid systemd PATH resolution restrictions
+func getPctPath() string {
+	if _, err := os.Stat("/usr/sbin/pct"); err == nil {
+		return "/usr/sbin/pct"
+	}
+	return "pct"
+}
+
 // isMockMode checks if we should run in mock mode
 func isMockMode() bool {
 	if os.Getenv("PROXMOX_MOCK") == "true" {
 		return true
+	}
+	if _, err := os.Stat("/usr/sbin/pct"); err == nil {
+		return false
 	}
 	_, err := exec.LookPath("pct")
 	return err != nil
@@ -513,7 +524,7 @@ func getContainerList() ([]ContainerBasic, error) {
 		}, nil
 	}
 
-	output, err := runCommandWithTimeout(3*time.Second, "pct", "list")
+	output, err := runCommandWithTimeout(3*time.Second, getPctPath(), "list")
 	if err != nil {
 		return nil, fmt.Errorf("failed to execute pct list: %w", err)
 	}
@@ -573,7 +584,7 @@ func parseContainerConfig(filePath string) (map[string]string, error) {
 	return conf, scanner.Err()
 }
 
-// getContainerDetails fetches rich metrics for every container in the cluster
+// getContainerDetails fetches rich metrics for every container in the cluster in PARALLEL
 func getContainerDetails() ([]ContainerDetail, error) {
 	if isMockMode() {
 		return []ContainerDetail{
@@ -624,69 +635,86 @@ func getContainerDetails() ([]ContainerDetail, error) {
 		return nil, err
 	}
 
-	var details []ContainerDetail
-	for _, basic := range basics {
-		detail := ContainerDetail{
-			VMID:   basic.VMID,
-			Name:   basic.Name,
-			Status: basic.Status,
-		}
+	details := make([]ContainerDetail, len(basics))
 
-		if basic.Status == "running" {
-			output, err := runCommandWithTimeout(2*time.Second, "pct", "status", strconv.Itoa(basic.VMID), "--verbose")
-			if err == nil {
-				scanner := bufio.NewScanner(strings.NewReader(output))
-				for scanner.Scan() {
-					line := scanner.Text()
-					parts := strings.SplitN(line, ":", 2)
-					if len(parts) != 2 {
-						continue
-					}
-					key := strings.ToLower(strings.TrimSpace(parts[0]))
-					val := strings.TrimSpace(parts[1])
+	type result struct {
+		index  int
+		detail ContainerDetail
+	}
 
-					switch key {
-					case "cpu":
-						detail.CPU, _ = strconv.ParseFloat(val, 64)
-					case "cpus":
-						detail.CPUs, _ = strconv.Atoi(val)
-					case "mem":
-						detail.MemMiB = parseToMiB(val)
-					case "maxmem":
-						detail.MaxMemMiB = parseToMiB(val)
-					case "swap":
-						detail.SwapMiB = parseToMiB(val)
-					case "maxswap":
-						detail.MaxSwapMiB = parseToMiB(val)
-					case "uptime":
-						detail.UptimeSeconds, _ = strconv.ParseInt(val, 10, 64)
-					}
-				}
-				if detail.MaxMemMiB > 0 {
-					detail.MemUtilizationPct = (detail.MemMiB / detail.MaxMemMiB) * 100.0
-				}
-			} else {
-				log.Printf("Warning: Failed to fetch pct status for container %d (timeout or error): %v", basic.VMID, err)
+	ch := make(chan result, len(basics))
+
+	// Spawn status queries concurrently to avoid sequential loop delay accumulation
+	for i, basic := range basics {
+		go func(idx int, b ContainerBasic) {
+			detail := ContainerDetail{
+				VMID:   b.VMID,
+				Name:   b.Name,
+				Status: b.Status,
 			}
-		}
 
-		// Fill static limits from config if status run failed or was skipped (stopped status)
-		if detail.MaxMemMiB == 0 {
-			confPath := fmt.Sprintf("/etc/pve/lxc/%d.conf", basic.VMID)
-			if conf, parseErr := parseContainerConfig(confPath); parseErr == nil {
-				if coresVal, ok := conf["cores"]; ok {
-					detail.CPUs, _ = strconv.Atoi(coresVal)
-				}
-				if memVal, ok := conf["memory"]; ok {
-					detail.MaxMemMiB = parseToMiB(memVal)
-				}
-				if swapVal, ok := conf["swap"]; ok {
-					detail.MaxSwapMiB = parseToMiB(swapVal)
+			if b.Status == "running" {
+				output, err := runCommandWithTimeout(2*time.Second, getPctPath(), "status", strconv.Itoa(b.VMID), "--verbose")
+				if err == nil {
+					scanner := bufio.NewScanner(strings.NewReader(output))
+					for scanner.Scan() {
+						line := scanner.Text()
+						parts := strings.SplitN(line, ":", 2)
+						if len(parts) != 2 {
+							continue
+						}
+						key := strings.ToLower(strings.TrimSpace(parts[0]))
+						val := strings.TrimSpace(parts[1])
+
+						switch key {
+						case "cpu":
+							detail.CPU, _ = strconv.ParseFloat(val, 64)
+						case "cpus":
+							detail.CPUs, _ = strconv.Atoi(val)
+						case "mem":
+							detail.MemMiB = parseToMiB(val)
+						case "maxmem":
+							detail.MaxMemMiB = parseToMiB(val)
+						case "swap":
+							detail.SwapMiB = parseToMiB(val)
+						case "maxswap":
+							detail.MaxSwapMiB = parseToMiB(val)
+						case "uptime":
+							detail.UptimeSeconds, _ = strconv.ParseInt(val, 10, 64)
+						}
+					}
+					if detail.MaxMemMiB > 0 {
+						detail.MemUtilizationPct = (detail.MemMiB / detail.MaxMemMiB) * 100.0
+					}
+				} else {
+					log.Printf("Warning: Failed to fetch pct status for container %d: %v", b.VMID, err)
 				}
 			}
-		}
 
-		details = append(details, detail)
+			// Fill static limits from config if status run failed or was skipped
+			if detail.MaxMemMiB == 0 {
+				confPath := fmt.Sprintf("/etc/pve/lxc/%d.conf", b.VMID)
+				if conf, parseErr := parseContainerConfig(confPath); parseErr == nil {
+					if coresVal, ok := conf["cores"]; ok {
+						detail.CPUs, _ = strconv.Atoi(coresVal)
+					}
+					if memVal, ok := conf["memory"]; ok {
+						detail.MaxMemMiB = parseToMiB(memVal)
+					}
+					if swapVal, ok := conf["swap"]; ok {
+						detail.MaxSwapMiB = parseToMiB(swapVal)
+					}
+				}
+			}
+
+			ch <- result{index: idx, detail: detail}
+		}(i, basic)
+	}
+
+	// Gather concurrent results preserving indexing order
+	for i := 0; i < len(basics); i++ {
+		res := <-ch
+		details[res.index] = res.detail
 	}
 
 	return details, nil
@@ -996,7 +1024,7 @@ func main() {
 	fmt.Printf("[%s] Starting Proxmox API Broker... listening on http://%s\n", time.Now().Format(time.RFC3339), bindAddr)
 
 	if isMockMode() {
-		fmt.Printf("[%s] WARNING: Proxmox CLI toolkit ('pct') not detected. Operating in MOCK MODE with realistic home lab telemetry.\n", time.Now().Format(time.RFC3339))
+		fmt.Printf("[%s] WARNING: Proxmox CLI toolkit ('/usr/sbin/pct') not detected. Operating in MOCK MODE with realistic home lab telemetry.\n", time.Now().Format(time.RFC3339))
 	} else {
 		fmt.Printf("[%s] Operating in hypervisor PRODUCTION mode on Proxmox VE host.\n", time.Now().Format(time.RFC3339))
 	}
