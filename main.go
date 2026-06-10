@@ -27,14 +27,22 @@ var (
 )
 
 // JSON Response Schemas
+
 type HostStats struct {
-	CPUUtilizationPercent float64 `json:"cpu_utilization_percent"`
-	RAMTotalBytes         int64   `json:"ram_total_bytes"`
-	RAMUsedBytes          int64   `json:"ram_used_bytes"`
-	RAMUsedPercent        float64 `json:"ram_used_percent"`
-	DiskTotalBytes        int64   `json:"disk_total_bytes"`
-	DiskUsedBytes         int64   `json:"disk_used_bytes"`
-	DiskUsedPercent       float64 `json:"disk_used_percent"`
+	CPUUtilizationPercent float64         `json:"cpu_utilization_percent"`
+	RAMTotalBytes         int64           `json:"ram_total_bytes"`
+	RAMUsedBytes          int64           `json:"ram_used_bytes"`
+	RAMUsedPercent        float64         `json:"ram_used_percent"`
+	DiskTotalBytes        int64           `json:"disk_total_bytes"`
+	DiskUsedBytes         int64           `json:"disk_used_bytes"`
+	DiskUsedPercent       float64         `json:"disk_used_percent"`
+	StorageStatus         *StorageStatus  `json:"storage_status,omitempty"`
+}
+
+type StorageStatus struct {
+	PVESMStatus string          `json:"pvesm_status,omitempty"`
+	ZPoolStatus string          `json:"zpool_status,omitempty"`
+	Devices     json.RawMessage `json:"devices,omitempty"` // Raw JSON output from lsblk -J
 }
 
 type ContainerBasic struct {
@@ -48,33 +56,83 @@ type TelemetryResponse struct {
 	Containers []ContainerBasic `json:"containers"`
 }
 
-type ContainerDetail struct {
-	VMID              int     `json:"vmid"`
-	Name              string  `json:"name"`
-	Status            string  `json:"status"`
-	CPU               float64 `json:"cpu"`
-	CPUs              int     `json:"cpus"`
-	MemMiB            float64 `json:"mem_mib"`
-	MaxMemMiB         float64 `json:"maxmem_mib"`
-	MemUtilizationPct float64 `json:"mem_utilization_percent"`
-	SwapMiB           float64 `json:"swap_mib"`
-	MaxSwapMiB        float64 `json:"maxswap_mib"`
-	UptimeSeconds     int64   `json:"uptime_seconds"`
+type NetworkInterface struct {
+	Name   string `json:"name"`
+	Bridge string `json:"bridge"`
+	MAC    string `json:"mac"`
+	IP     string `json:"ip"`
+	GW     string `json:"gw"`
+	IP6    string `json:"ip6"`
+	GW6    string `json:"gw6"`
 }
 
-// OpenAPI 3.0 specification structural JSON (Excluding notes endpoint)
+// Deep Probe Schemas
+type DNSProbe struct {
+	Type       string   `json:"type"` // "adguard" or "pihole"
+	Upstreams  []string `json:"upstreams"`
+	Bootstraps []string `json:"bootstraps,omitempty"`
+}
+
+type ReverseProxyProbe struct {
+	Count       int      `json:"count"`
+	ProxyPasses []string `json:"proxy_passes"`
+}
+
+type VPNProbe struct {
+	TunActive bool   `json:"tun_active"`
+	Connected bool   `json:"connected"`
+	IPReport  string `json:"ip_report,omitempty"`
+}
+
+type DockerContainer struct {
+	Name   string `json:"name"`
+	Status string `json:"status"`
+	Ports  string `json:"ports"`
+}
+
+type DockerProbe struct {
+	Installed  bool              `json:"installed"`
+	Containers []DockerContainer `json:"containers,omitempty"`
+}
+
+type ContainerProbes struct {
+	DNS          *DNSProbe          `json:"dns,omitempty"`
+	ReverseProxy *ReverseProxyProbe `json:"reverse_proxy,omitempty"`
+	VPN          *VPNProbe          `json:"vpn,omitempty"`
+	Docker       *DockerProbe       `json:"docker,omitempty"`
+}
+
+type ContainerDetail struct {
+	VMID              int                `json:"vmid"`
+	Name              string             `json:"name"`
+	Status            string             `json:"status"`
+	CPU               float64            `json:"cpu"`
+	CPUs              int                `json:"cpus"`
+	MemMiB            float64            `json:"mem_mib"`
+	MaxMemMiB         float64            `json:"maxmem_mib"`
+	MemUtilizationPct float64            `json:"mem_utilization_percent"`
+	SwapMiB           float64            `json:"swap_mib"`
+	MaxSwapMiB        float64            `json:"maxswap_mib"`
+	UptimeSeconds     int64              `json:"uptime_seconds"`
+	NetworkInterfaces []NetworkInterface `json:"network_interfaces"`
+	LiveIPAddresses   []string           `json:"live_ip_addresses"`
+	OpenPorts         []int              `json:"open_ports"`
+	Probes            *ContainerProbes   `json:"probes,omitempty"`
+}
+
+// OpenAPI 3.0 specification structural JSON (Updated with deep probes)
 const openapiJSON = `{
   "openapi": "3.0.3",
   "info": {
     "title": "Proxmox Telemetry & Configuration Broker API",
-    "description": "A lightweight, read-only telemetry and configuration broker API built for a Proxmox VE hypervisor host. Serves metrics and metadata to the Hermes AI agent framework.",
+    "description": "A lightweight, read-only telemetry and configuration broker API built for a Proxmox VE hypervisor host. Serves metrics, deep configuration probes, and container details to the Hermes AI agent framework.",
     "version": "1.0.0"
   },
   "paths": {
     "/api/v1/telemetry": {
       "get": {
         "summary": "Retrieve aggregated host and basic container statistics",
-        "description": "Returns host CPU utilization (200ms delta sample), RAM total/used, disk total/used, and basic container status list.",
+        "description": "Returns host CPU utilization (200ms delta sample), RAM total/used, disk total/used, host storage details (PVESM, ZFS, mounts), and basic container status list.",
         "security": [
           {
             "ApiKeyAuth": []
@@ -100,7 +158,7 @@ const openapiJSON = `{
     "/api/v1/containers": {
       "get": {
         "summary": "List all containers in the cluster with detailed stats",
-        "description": "Returns a detailed JSON array of all LXC containers with live calculated memory usage (converted to MiB) and CPU values.",
+        "description": "Returns a detailed JSON array of all LXC containers with live calculated memory usage, CPU values, network configurations, active IPs, open ports, and deep service probes (Docker, DNS, Reverse Proxy, VPN).",
         "security": [
           {
             "ApiKeyAuth": []
@@ -191,7 +249,10 @@ const openapiJSON = `{
               "ram_used_percent": { "type": "number" },
               "disk_total_bytes": { "type": "integer" },
               "disk_used_bytes": { "type": "integer" },
-              "disk_used_percent": { "type": "number" }
+              "disk_used_percent": { "type": "number" },
+              "storage_status": {
+                "$ref": "#/components/schemas/StorageStatus"
+              }
             }
           },
           "containers": {
@@ -202,12 +263,79 @@ const openapiJSON = `{
           }
         }
       },
+      "StorageStatus": {
+        "type": "object",
+        "properties": {
+          "pvesm_status": { "type": "string" },
+          "zpool_status": { "type": "string" },
+          "devices": { "type": "object", "description": "Raw lsblk JSON structure" }
+        }
+      },
       "ContainerBasic": {
         "type": "object",
         "properties": {
           "vmid": { "type": "integer" },
           "status": { "type": "string" },
           "name": { "type": "string" }
+        }
+      },
+      "NetworkInterface": {
+        "type": "object",
+        "properties": {
+          "name": { "type": "string" },
+          "bridge": { "type": "string" },
+          "mac": { "type": "string" },
+          "ip": { "type": "string" },
+          "gw": { "type": "string" },
+          "ip6": { "type": "string" },
+          "gw6": { "type": "string" }
+        }
+      },
+      "DNSProbe": {
+        "type": "object",
+        "properties": {
+          "type": { "type": "string" },
+          "upstreams": { "type": "array", "items": { "type": "string" } },
+          "bootstraps": { "type": "array", "items": { "type": "string" } }
+        }
+      },
+      "ReverseProxyProbe": {
+        "type": "object",
+        "properties": {
+          "count": { "type": "integer" },
+          "proxy_passes": { "type": "array", "items": { "type": "string" } }
+        }
+      },
+      "VPNProbe": {
+        "type": "object",
+        "properties": {
+          "tun_active": { "type": "boolean" },
+          "connected": { "type": "boolean" },
+          "ip_report": { "type": "string" }
+        }
+      },
+      "DockerContainer": {
+        "type": "object",
+        "properties": {
+          "name": { "type": "string" },
+          "status": { "type": "string" },
+          "ports": { "type": "string" }
+        }
+      },
+      "DockerProbe": {
+        "type": "object",
+        "properties": {
+          "installed": { "type": "boolean" },
+          "containers": { "type": "array", "items": { "$ref": "#/components/schemas/DockerContainer" } }
+        }
+      },
+      "ContainerProbes": {
+        "type": "object",
+        "properties": {
+          "dns": { "$ref": "#/components/schemas/DNSProbe" },
+          "reverse_proxy": { "$ref": "#/components/schemas/ReverseProxyProbe" },
+          "vpn": { "$ref": "#/components/schemas/VPNProbe" },
+          "docker": { "$ref": "#/components/schemas/DockerProbe" }
         }
       },
       "ContainerDetail": {
@@ -223,7 +351,28 @@ const openapiJSON = `{
           "mem_utilization_percent": { "type": "number" },
           "swap_mib": { "type": "number" },
           "maxswap_mib": { "type": "number" },
-          "uptime_seconds": { "type": "integer" }
+          "uptime_seconds": { "type": "integer" },
+          "network_interfaces": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NetworkInterface"
+            }
+          },
+          "live_ip_addresses": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "open_ports": {
+            "type": "array",
+            "items": {
+              "type": "integer"
+            }
+          },
+          "probes": {
+            "$ref": "#/components/schemas/ContainerProbes"
+          }
         }
       }
     }
@@ -514,13 +663,45 @@ func getHostDiskSpace() (total, used int64, err error) {
 	return totalBytes, usedBytes, nil
 }
 
+// getHostStorageStatus retrieves ZFS status, PVESM storage limits, and block devices
+func getHostStorageStatus() (*StorageStatus, error) {
+	if isMockMode() {
+		mockDevices := []byte(`{"blockdevices": [{"name": "sda", "size": "1.8T", "fstype": "zfs_member"}]}`)
+		return &StorageStatus{
+			PVESMStatus: "Name             Type     Status           Total            Used       Available        %\\nlocal             dir     active       982334812        42318991     839213812    4.31%\\nlocal-lvm      lvmthin     active       239012390        12930219     226082171    5.41%",
+			ZPoolStatus: "  pool: tank\\n state: ONLINE\\n  scan: scrub repaired 0B in 01:23:45 with 0 errors on Sun Jun  7 02:23:45 2026\\nconfig:\\n\\n\\tNAME        STATE     READ WRITE CKSUM\\n\\ttank        ONLINE       0     0     0\\n\\t  mirror-0  ONLINE       0     0     0\\n\\t    sda     ONLINE       0     0     0\\n\\t    sdb     ONLINE       0     0     0\\n\\nerrors: No known data errors",
+			Devices:     json.RawMessage(mockDevices),
+		}, nil
+	}
+
+	status := &StorageStatus{}
+
+	// 1. pvesm status check
+	if pveOut, err := runCommandWithTimeout(3*time.Second, "pvesm", "status"); err == nil {
+		status.PVESMStatus = pveOut
+	}
+
+	// 2. zpool status check
+	if zfsOut, err := runCommandWithTimeout(3*time.Second, "zpool", "status"); err == nil {
+		status.ZPoolStatus = zfsOut
+	}
+
+	// 3. lsblk JSON details
+	if lsblkOut, err := runCommandWithTimeout(3*time.Second, "lsblk", "-o", "NAME,SIZE,FSTYPE,MOUNTPOINT,LABEL", "-J"); err == nil {
+		status.Devices = json.RawMessage(lsblkOut)
+	}
+
+	return status, nil
+}
+
 // getContainerList lists LXC containers (basic information)
 func getContainerList() ([]ContainerBasic, error) {
 	if isMockMode() {
 		return []ContainerBasic{
-			{VMID: 100, Status: "running", Name: "web-server"},
+			{VMID: 100, Status: "running", Name: "npm-router"},
 			{VMID: 101, Status: "stopped", Name: "database-ct"},
-			{VMID: 102, Status: "running", Name: "pihole"},
+			{VMID: 102, Status: "running", Name: "pihole-dns"},
+			{VMID: 104, Status: "running", Name: "torrent-vpn"},
 		}, nil
 	}
 
@@ -584,13 +765,324 @@ func parseContainerConfig(filePath string) (map[string]string, error) {
 	return conf, scanner.Err()
 }
 
+// parseNetValue parses raw config net0, net1 settings into structured data
+func parseNetValue(val string) NetworkInterface {
+	netConf := NetworkInterface{}
+	parts := strings.Split(val, ",")
+	for _, part := range parts {
+		kv := strings.SplitN(part, "=", 2)
+		if len(kv) == 2 {
+			k := strings.TrimSpace(kv[0])
+			v := strings.TrimSpace(kv[1])
+			switch k {
+			case "name":
+				netConf.Name = v
+			case "bridge":
+				netConf.Bridge = v
+			case "hwaddr":
+				netConf.MAC = v
+			case "ip":
+				netConf.IP = v
+			case "gw":
+				netConf.GW = v
+			case "ip6":
+				netConf.IP6 = v
+			case "gw6":
+				netConf.GW6 = v
+			}
+		}
+	}
+	return netConf
+}
+
+// getContainerNetworkConfig reads the static network configuration of LXC from conf files
+func getContainerNetworkConfig(vmid int) ([]NetworkInterface, error) {
+	if isMockMode() {
+		return []NetworkInterface{
+			{
+				Name:   "eth0",
+				Bridge: "vmbr0",
+				MAC:    "BC:24:11:AB:CD:EF",
+				IP:     "dhcp",
+				GW:     "192.168.2.1",
+			},
+		}, nil
+	}
+
+	confPath := fmt.Sprintf("/etc/pve/lxc/%d.conf", vmid)
+	conf, err := parseContainerConfig(confPath)
+	if err != nil {
+		return nil, err
+	}
+
+	var interfaces []NetworkInterface
+	for k, v := range conf {
+		if strings.HasPrefix(k, "net") {
+			netConf := parseNetValue(v)
+			interfaces = append(interfaces, netConf)
+		}
+	}
+	return interfaces, nil
+}
+
+// getContainerLiveIPs fetches actual live IP addresses via hostname -I inside the container
+func getContainerLiveIPs(vmid int) ([]string, error) {
+	if isMockMode() {
+		if vmid == 100 {
+			return []string{"192.168.2.150"}, nil
+		}
+		if vmid == 101 {
+			return []string{"192.168.2.151"}, nil
+		}
+		if vmid == 102 {
+			return []string{"192.168.2.152", "fe80::bc24:11ff:feab:cdef"}, nil
+		}
+		return []string{"192.168.2.200"}, nil
+	}
+
+	output, err := runCommandWithTimeout(2*time.Second, getPctPath(), "exec", strconv.Itoa(vmid), "--", "hostname", "-I")
+	if err != nil {
+		return nil, err
+	}
+
+	var ips []string
+	fields := strings.Fields(output)
+	for _, field := range fields {
+		ips = append(ips, strings.TrimSpace(field))
+	}
+	return ips, nil
+}
+
+// getContainerOpenPorts fetches listening TCP ports inside container (ss -> netstat)
+func getContainerOpenPorts(vmid int) ([]int, error) {
+	if isMockMode() {
+		if vmid == 100 {
+			return []int{80, 443}, nil
+		}
+		if vmid == 101 {
+			return []int{3306}, nil
+		}
+		if vmid == 102 {
+			return []int{53, 80}, nil
+		}
+		return []int{22}, nil
+	}
+
+	output, err := runCommandWithTimeout(2*time.Second, getPctPath(), "exec", strconv.Itoa(vmid), "--", "ss", "-tln")
+	if err != nil {
+		// Fallback to netstat if ss is missing
+		output, err = runCommandWithTimeout(2*time.Second, getPctPath(), "exec", strconv.Itoa(vmid), "--", "netstat", "-tln")
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	var ports []int
+	seen := make(map[int]bool)
+	lines := strings.Split(output, "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "State") || strings.HasPrefix(line, "Netid") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 5 {
+			continue
+		}
+		addrPort := fields[4]
+		idx := strings.LastIndex(addrPort, ":")
+		if idx != -1 && idx < len(addrPort)-1 {
+			portStr := addrPort[idx+1:]
+			if p, err := strconv.Atoi(portStr); err == nil {
+				if !seen[p] {
+					seen[p] = true
+					ports = append(ports, p)
+				}
+			}
+		}
+	}
+	return ports, nil
+}
+
+// deepProbeContainer performs specific DNS, Reverse Proxy, VPN, and Docker probes inside the running container
+func deepProbeContainer(vmid int, name string) *ContainerProbes {
+	probes := &ContainerProbes{}
+	loweredName := strings.ToLower(name)
+
+	// 1. DNS / Ad-Blocker Probing
+	if strings.Contains(loweredName, "dns") || strings.Contains(loweredName, "adguard") || strings.Contains(loweredName, "pihole") {
+		dns := &DNSProbe{}
+		// Check for AdGuard Home config
+		if isMockMode() {
+			dns.Type = "adguard"
+			dns.Upstreams = []string{"https://dns.cloudflare.com/dns-query", "1.1.1.1"}
+			dns.Bootstraps = []string{"9.9.9.9"}
+			probes.DNS = dns
+		} else {
+			if adgYaml, err := runCommandWithTimeout(2*time.Second, getPctPath(), "exec", strconv.Itoa(vmid), "--", "cat", "/opt/AdGuardHome/AdGuardHome.yaml"); err == nil {
+				dns.Type = "adguard"
+				scanner := bufio.NewScanner(strings.NewReader(adgYaml))
+				inUpstreams := false
+				inBootstraps := false
+				for scanner.Scan() {
+					line := strings.TrimSpace(scanner.Text())
+					if strings.HasPrefix(line, "upstream_dns:") {
+						inUpstreams = true
+						inBootstraps = false
+						continue
+					}
+					if strings.HasPrefix(line, "bootstrap_dns:") {
+						inBootstraps = true
+						inUpstreams = false
+						continue
+					}
+					// If we hit another root block, stop collecting
+					if len(line) > 0 && !strings.HasPrefix(line, "-") && !strings.HasPrefix(line, " ") && !strings.Contains(line, "_dns:") {
+						inUpstreams = false
+						inBootstraps = false
+					}
+					if strings.HasPrefix(line, "- ") {
+						val := strings.TrimPrefix(line, "- ")
+						val = strings.Trim(val, "\"' ")
+						if inUpstreams {
+							dns.Upstreams = append(dns.Upstreams, val)
+						} else if inBootstraps {
+							dns.Bootstraps = append(dns.Bootstraps, val)
+						}
+					}
+				}
+				probes.DNS = dns
+			} else if piVars, err := runCommandWithTimeout(2*time.Second, getPctPath(), "exec", strconv.Itoa(vmid), "--", "cat", "/etc/pihole/setupVars.conf"); err == nil {
+				dns.Type = "pihole"
+				scanner := bufio.NewScanner(strings.NewReader(piVars))
+				for scanner.Scan() {
+					line := strings.TrimSpace(scanner.Text())
+					if strings.HasPrefix(line, "PIHOLE_DNS_") {
+						parts := strings.SplitN(line, "=", 2)
+						if len(parts) == 2 {
+							dns.Upstreams = append(dns.Upstreams, strings.TrimSpace(parts[1]))
+						}
+					}
+				}
+				probes.DNS = dns
+			}
+		}
+	}
+
+	// 2. Reverse Proxy Probing (Nginx Proxy Manager / Traefik / Nginx)
+	if strings.Contains(loweredName, "npm") || strings.Contains(loweredName, "nginx") || strings.Contains(loweredName, "proxy") {
+		proxy := &ReverseProxyProbe{}
+		if isMockMode() {
+			proxy.Count = 3
+			proxy.ProxyPasses = []string{"http://192.168.2.200:8080", "https://192.168.2.152:443", "http://192.168.2.100:3000"}
+			probes.ReverseProxy = proxy
+		} else {
+			// Find configurations count in NPM directory
+			if listOut, err := runCommandWithTimeout(2*time.Second, getPctPath(), "exec", strconv.Itoa(vmid), "--", "find", "/data/nginx/proxy_host", "-name", "*.conf"); err == nil {
+				scanner := bufio.NewScanner(strings.NewReader(listOut))
+				count := 0
+				for scanner.Scan() {
+					if strings.TrimSpace(scanner.Text()) != "" {
+						count++
+					}
+				}
+				proxy.Count = count
+
+				// Grep proxy_pass configurations to map target endpoints
+				if passesOut, err := runCommandWithTimeout(2*time.Second, getPctPath(), "exec", strconv.Itoa(vmid), "--", "sh", "-c", "grep -h 'proxy_pass' /data/nginx/proxy_host/*.conf 2>/dev/null"); err == nil {
+					scannerPasses := bufio.NewScanner(strings.NewReader(passesOut))
+					seen := make(map[string]bool)
+					for scannerPasses.Scan() {
+						fields := strings.Fields(scannerPasses.Text())
+						if len(fields) >= 2 {
+							target := strings.TrimSuffix(fields[1], ";")
+							if !seen[target] {
+								seen[target] = true
+								proxy.ProxyPasses = append(proxy.ProxyPasses, target)
+							}
+						}
+					}
+				}
+				probes.ReverseProxy = proxy
+			}
+		}
+	}
+
+	// 3. VPN / Torrent Probing (Checks for VPN leaks and connections)
+	if strings.Contains(loweredName, "qbittorrent") || strings.Contains(loweredName, "vpn") || strings.Contains(loweredName, "torrent") {
+		vpn := &VPNProbe{}
+		if isMockMode() {
+			vpn.TunActive = true
+			vpn.Connected = true
+			vpn.IPReport = "Mullvad VPN Connected (IP: 185.213.154.12)"
+			probes.VPN = vpn
+		} else {
+			// Check if tun0 interface exists
+			if _, err := runCommandWithTimeout(2*time.Second, getPctPath(), "exec", strconv.Itoa(vmid), "--", "ip", "addr", "show", "tun0"); err == nil {
+				vpn.TunActive = true
+				// Check external IP Mullvad VPN connectivity status
+				if checkOut, err := runCommandWithTimeout(3*time.Second, getPctPath(), "exec", strconv.Itoa(vmid), "--", "curl", "-s", "--max-time", "2", "https://am.i.mullvad.net/connected"); err == nil {
+					vpn.Connected = strings.Contains(strings.ToLower(checkOut), "connected")
+					vpn.IPReport = strings.TrimSpace(checkOut)
+				}
+			} else {
+				vpn.TunActive = false
+				vpn.Connected = false
+			}
+			probes.VPN = vpn
+		}
+	}
+
+	// 4. Docker Overlay Probing
+	docker := &DockerProbe{}
+	if isMockMode() {
+		if vmid == 100 || vmid == 104 {
+			docker.Installed = true
+			docker.Containers = []DockerContainer{
+				{Name: "coolify-helper", Status: "Up 2 hours", Ports: "80/tcp"},
+				{Name: "app-backend", Status: "Up 3 days", Ports: "8080->8080/tcp"},
+			}
+			probes.Docker = docker
+		}
+	} else {
+		if _, err := runCommandWithTimeout(2*time.Second, getPctPath(), "exec", strconv.Itoa(vmid), "--", "command", "-v", "docker"); err == nil {
+			docker.Installed = true
+			// Query Docker containers details in pseudo CSV
+			if docOut, err := runCommandWithTimeout(3*time.Second, getPctPath(), "exec", strconv.Itoa(vmid), "--", "docker", "ps", "--format", "{{.Names}}||{{.Status}}||{{.Ports}}"); err == nil {
+				scanner := bufio.NewScanner(strings.NewReader(docOut))
+				for scanner.Scan() {
+					line := scanner.Text()
+					parts := strings.Split(line, "||")
+					if len(parts) >= 2 {
+						container := DockerContainer{
+							Name:   strings.TrimSpace(parts[0]),
+							Status: strings.TrimSpace(parts[1]),
+						}
+						if len(parts) >= 3 {
+							container.Ports = strings.TrimSpace(parts[2])
+						}
+						docker.Containers = append(docker.Containers, container)
+					}
+				}
+			}
+			probes.Docker = docker
+		}
+	}
+
+	// Return probes only if at least one service probe was activated
+	if probes.DNS != nil || probes.ReverseProxy != nil || probes.VPN != nil || probes.Docker != nil {
+		return probes
+	}
+	return nil
+}
+
 // getContainerDetails fetches rich metrics for every container in the cluster in PARALLEL
 func getContainerDetails() ([]ContainerDetail, error) {
 	if isMockMode() {
 		return []ContainerDetail{
 			{
 				VMID:              100,
-				Name:              "web-server",
+				Name:              "npm-router",
 				Status:            "running",
 				CPU:               0.02,
 				CPUs:              2,
@@ -600,6 +1092,23 @@ func getContainerDetails() ([]ContainerDetail, error) {
 				SwapMiB:           128.0,
 				MaxSwapMiB:        512.0,
 				UptimeSeconds:     86400,
+				NetworkInterfaces: []NetworkInterface{
+					{Name: "eth0", Bridge: "vmbr0", MAC: "BC:24:11:AB:CD:EF", IP: "dhcp", GW: "192.168.2.1"},
+				},
+				LiveIPAddresses: []string{"192.168.2.150"},
+				OpenPorts:       []int{80, 443},
+				Probes: &ContainerProbes{
+					ReverseProxy: &ReverseProxyProbe{
+						Count: 3,
+						ProxyPasses: []string{"http://192.168.2.200:8080", "https://192.168.2.152:443", "http://192.168.2.100:3000"},
+					},
+					Docker: &DockerProbe{
+						Installed: true,
+						Containers: []DockerContainer{
+							{Name: "coolify-helper", Status: "Up 2 hours", Ports: "80/tcp"},
+						},
+					},
+				},
 			},
 			{
 				VMID:              101,
@@ -613,10 +1122,16 @@ func getContainerDetails() ([]ContainerDetail, error) {
 				SwapMiB:           0.0,
 				MaxSwapMiB:        2048.0,
 				UptimeSeconds:     0,
+				NetworkInterfaces: []NetworkInterface{
+					{Name: "eth0", Bridge: "vmbr0", MAC: "BC:24:11:11:22:33", IP: "192.168.2.101/24", GW: "192.168.2.1"},
+				},
+				LiveIPAddresses: nil,
+				OpenPorts:       nil,
+				Probes:          nil,
 			},
 			{
 				VMID:              102,
-				Name:              "pihole",
+				Name:              "pihole-dns",
 				Status:            "running",
 				CPU:               0.01,
 				CPUs:              1,
@@ -626,6 +1141,42 @@ func getContainerDetails() ([]ContainerDetail, error) {
 				SwapMiB:           64.0,
 				MaxSwapMiB:        512.0,
 				UptimeSeconds:     172800,
+				NetworkInterfaces: []NetworkInterface{
+					{Name: "eth0", Bridge: "vmbr0", MAC: "BC:24:11:44:55:66", IP: "dhcp", GW: "192.168.2.1"},
+				},
+				LiveIPAddresses: []string{"192.168.2.152", "fe80::bc24:11ff:feab:cdef"},
+				OpenPorts:       []int{53, 80},
+				Probes: &ContainerProbes{
+					DNS: &DNSProbe{
+						Type:      "pihole",
+						Upstreams: []string{"1.1.1.1", "8.8.8.8"},
+					},
+				},
+			},
+			{
+				VMID:              104,
+				Name:              "torrent-vpn",
+				Status:            "running",
+				CPU:               0.05,
+				CPUs:              2,
+				MemMiB:            512.0,
+				MaxMemMiB:         2048.0,
+				MemUtilizationPct: 25.0,
+				SwapMiB:           256.0,
+				MaxSwapMiB:        1024.0,
+				UptimeSeconds:     43200,
+				NetworkInterfaces: []NetworkInterface{
+					{Name: "eth0", Bridge: "vmbr0", MAC: "BC:24:11:77:88:99", IP: "dhcp", GW: "192.168.2.1"},
+				},
+				LiveIPAddresses: []string{"192.168.2.154"},
+				OpenPorts:       []int{8112, 6881},
+				Probes: &ContainerProbes{
+					VPN: &VPNProbe{
+						TunActive: true,
+						Connected: true,
+						IPReport:  "Mullvad VPN Connected (IP: 185.213.154.12)",
+					},
+				},
 			},
 		}, nil
 	}
@@ -648,12 +1199,21 @@ func getContainerDetails() ([]ContainerDetail, error) {
 	for i, basic := range basics {
 		go func(idx int, b ContainerBasic) {
 			detail := ContainerDetail{
-				VMID:   b.VMID,
-				Name:   b.Name,
-				Status: b.Status,
+				VMID:              b.VMID,
+				Name:              b.Name,
+				Status:            b.Status,
+				NetworkInterfaces: make([]NetworkInterface, 0),
+				LiveIPAddresses:   make([]string, 0),
+				OpenPorts:         make([]int, 0),
+			}
+
+			// 1. Fetch static interface config (always available from /etc/pve/lxc/*.conf)
+			if netConfigs, err := getContainerNetworkConfig(b.VMID); err == nil {
+				detail.NetworkInterfaces = netConfigs
 			}
 
 			if b.Status == "running" {
+				// 2. Fetch verbose stats
 				output, err := runCommandWithTimeout(2*time.Second, getPctPath(), "status", strconv.Itoa(b.VMID), "--verbose")
 				if err == nil {
 					scanner := bufio.NewScanner(strings.NewReader(output))
@@ -689,6 +1249,23 @@ func getContainerDetails() ([]ContainerDetail, error) {
 				} else {
 					log.Printf("Warning: Failed to fetch pct status for container %d: %v", b.VMID, err)
 				}
+
+				// 3. Fetch runtime live IP addresses
+				if ips, err := getContainerLiveIPs(b.VMID); err == nil {
+					detail.LiveIPAddresses = ips
+				} else {
+					log.Printf("Warning: Failed to query live IPs for container %d: %v", b.VMID, err)
+				}
+
+				// 4. Fetch open TCP listening ports
+				if ports, err := getContainerOpenPorts(b.VMID); err == nil {
+					detail.OpenPorts = ports
+				} else {
+					log.Printf("Warning: Failed to query open ports for container %d: %v", b.VMID, err)
+				}
+
+				// 5. Deep Probing Services (DNS, NPM, VPN, Docker)
+				detail.Probes = deepProbeContainer(b.VMID, b.Name)
 			}
 
 			// Fill static limits from config if status run failed or was skipped
@@ -819,6 +1396,12 @@ func handleTelemetry(w http.ResponseWriter, r *http.Request) {
 		diskUsedPercent = (float64(diskUsed) / float64(diskTotal)) * 100.0
 	}
 
+	// Fetch Host Storage deep details
+	storageStatus, err := getHostStorageStatus()
+	if err != nil {
+		log.Printf("Error retrieving host storage: %v", err)
+	}
+
 	containers, err := getContainerList()
 	if err != nil {
 		log.Printf("Error retrieving container list: %v", err)
@@ -837,6 +1420,7 @@ func handleTelemetry(w http.ResponseWriter, r *http.Request) {
 			DiskTotalBytes:        diskTotal,
 			DiskUsedBytes:         diskUsed,
 			DiskUsedPercent:       diskUsedPercent,
+			StorageStatus:         storageStatus,
 		},
 		Containers: containers,
 	}
@@ -1031,8 +1615,8 @@ func main() {
 
 	server := &http.Server{
 		Addr:         bindAddr,
-		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 10 * time.Second,
+		ReadTimeout:  15 * time.Second, // Increased timeout to support extensive storage + network deep probes
+		WriteTimeout: 15 * time.Second,
 	}
 
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
